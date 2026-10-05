@@ -3253,6 +3253,7 @@ export const dict = {
   'startup.initRecovery.lastError': 'Laatste fout',
   'startup.initRecovery.retry': 'Opnieuw proberen',
   'startup.initRecovery.retrying': 'Opnieuw proberen…',
+  'startup.overlay.slow': 'Het opstarten duurt langer dan verwacht…',
   'onboarding.desktopRecovery.placeholders.remoteServer': 'de remote server',
   'onboarding.desktopRecovery.placeholders.unknownServer': 'onbekend',
   'vscodeLayout.title.chat': 'Chat',
