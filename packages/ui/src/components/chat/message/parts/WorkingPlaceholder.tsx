@@ -6,6 +6,8 @@ import { useThemeSystem } from '@/contexts/useThemeSystem';
 interface WorkingPlaceholderProps {
   isWorking: boolean;
   statusText: string | null;
+  /** Compact elapsed time of the running turn, shown after the status. */
+  elapsedLabel?: string | null;
   isGenericStatus?: boolean;
   isWaitingForPermission?: boolean;
   retryInfo?: { attempt?: number; next?: number } | null;
@@ -59,6 +61,7 @@ const formatRetryCountdown = (seconds: number): string => {
 export function WorkingPlaceholder({
   isWorking,
   statusText,
+  elapsedLabel,
   isGenericStatus,
   isWaitingForPermission,
   retryInfo,
@@ -235,9 +238,14 @@ export function WorkingPlaceholder({
   }
 
   const trimmedModelName = modelName?.trim() ?? '';
-  const label = trimmedModelName.length > 0
+  // The visible line is the action plus live progress; the model name is
+  // already on the composer below, so it survives only in the accessible name
+  // instead of taking the one line of space that can say what is happening.
+  const baseLabel = displayedText.charAt(0).toUpperCase() + displayedText.slice(1);
+  const visibleLabel = elapsedLabel ? `${baseLabel} · ${elapsedLabel}` : baseLabel;
+  const ariaLabel = trimmedModelName.length > 0
     ? t('chat.statusRow.modelStatus', { model: trimmedModelName, status: displayedText })
-    : displayedText.charAt(0).toUpperCase() + displayedText.slice(1);
+    : baseLabel;
 
   return (
     <div
@@ -249,12 +257,12 @@ export function WorkingPlaceholder({
       }
       role="status"
       aria-live={displayedPermission ? 'assertive' : 'polite'}
-      aria-label={label}
+      aria-label={ariaLabel}
       data-waiting={displayedPermission ? 'true' : undefined}
     >
-      <span className="text-sm">
+      <span className="min-w-0 truncate text-sm">
         {providerLogo}
-        {label}
+        {visibleLabel}
       </span>
     </div>
   );

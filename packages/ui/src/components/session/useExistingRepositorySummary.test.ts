@@ -17,8 +17,8 @@ const context: SourceControlRepositoryContext = {
   remotes: [remote('upstream', 'https://gitlab.com/team/repo.git'), remote('origin', 'git@github.com:team/repo.git')],
 };
 
-const cleanups: Array<() => void> = [];
-afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
+const cleanups: Array<() => void | Promise<void>> = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 type Probe = {
   directory: string;
@@ -69,8 +69,14 @@ const mount = async (overrides: Partial<Probe> = {}) => {
   };
   const render = () => act(() => { root.render(React.createElement(Component)); });
   render();
-  cleanups.push(() => {
-    act(() => { root.unmount(); });
+  cleanups.push(async () => {
+    // Async act plus a macrotask turn: React's scheduler can still hold a
+    // callback that reads `window.event`, and restoring the globals below
+    // would make it throw between tests.
+    await act(async () => {
+      root.unmount();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
     for (const [key, descriptor] of previous) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
       else Reflect.deleteProperty(globalThis, key);

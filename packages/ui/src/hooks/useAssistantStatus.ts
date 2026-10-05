@@ -1,10 +1,14 @@
 import React from 'react';
 import { useChatSessionSelection } from '@/components/chat/chatColumnSession';
+import { formatSessionActivityDuration } from '@/components/session/sessionActivityDurationFormat';
+import { useDurationTickerNow } from '@/hooks/useDurationTicker';
+import { useI18n } from '@/lib/i18n';
 import type { Message, ModelRef, Part, ReasoningPart, TextPart, ToolPart } from '@/lib/opencode/model';
 import { executeToolCalls, isExecuteTool, isShellTool, isSubagentTool } from '@/lib/opencode/tools';
 
 import type { MessageStreamPhase } from '@/stores/types/sessionTypes';
 import { useSessionUIStore } from '@/sync/session-ui-store';
+import { useSessionActivityStartedAt } from '@/sync/session-activity-timing';
 import { useDirectorySync, useSession, useSessionMessages, useSessionPermissions, useSessionForms, useSessionStatus } from '@/sync/sync-context';
 import { useSessionActivity } from './useSessionActivity';
 
@@ -19,6 +23,8 @@ interface WorkingSummary {
     isCooldown: boolean;
     lifecyclePhase: MessageStreamPhase | null;
     statusText: string | null;
+    /** Compact elapsed time of the running turn (`1m 24s`), null while idle. */
+    elapsedLabel: string | null;
     isGenericStatus: boolean;
     isWaitingForPermission: boolean;
     canAbort: boolean;
@@ -67,6 +73,7 @@ const DEFAULT_WORKING: WorkingSummary = {
     isCooldown: false,
     lifecyclePhase: null,
     statusText: null,
+    elapsedLabel: null,
     isGenericStatus: true,
     isWaitingForPermission: false,
     canAbort: false,
@@ -83,32 +90,50 @@ const DEFAULT_WORKING: WorkingSummary = {
 
 const EMPTY_PARTS: Part[] = [];
 const STATUS_SIGNATURE_SEPARATOR = '\u0000';
-const EDITING_TOOLS = new Set(['edit', 'write', 'patch']);
-// v2 tool names. `shell` replaced `bash`, `subagent` replaced `task`, and
-// `todowrite`/`todoread`/`list`/`lsp` are gone.
-const TOOL_STATUS_PHRASES = new Map(Object.entries({
-    read: 'reading file',
-    write: 'writing file',
-    edit: 'editing file',
-    patch: 'applying patch',
-    'file-diff': 'reading changes',
-    shell: 'running command',
-    execute: 'running a script',
-    grep: 'searching content',
-    glob: 'finding files',
-    subagent: 'delegating task',
-    webfetch: 'fetching URL',
-    websearch: 'searching web',
-    codesearch: 'web code search',
-    skill: 'learning skill',
-    question: 'asking question',
-}));
+
+type ToolBucket = 'read' | 'search' | 'edit' | 'command' | 'lookup' | 'delegate' | 'question' | 'skill';
+
+// Abstract buckets: several tools share one human phrase. The chip is a glance
+// line and the timeline already names the exact tool, so a bucket reads better
+// than a tool list. v2 tool names: `shell` replaced `bash`, `subagent`
+// replaced `task`, and `todowrite`/`todoread`/`list`/`lsp` are gone.
+const TOOL_BUCKETS = new Map<string, ToolBucket>(Object.entries({
+    read: 'read',
+    'file-diff': 'read',
+    grep: 'search',
+    glob: 'search',
+    edit: 'edit',
+    write: 'edit',
+    patch: 'edit',
+    shell: 'command',
+    execute: 'command',
+    webfetch: 'lookup',
+    websearch: 'lookup',
+    codesearch: 'lookup',
+    subagent: 'delegate',
+    question: 'question',
+    skill: 'skill',
+} satisfies Record<string, ToolBucket>));
+
+// [one call, several calls]; `{count}` becomes the number of parallel calls in
+// the bucket. Uncountable buckets keep one phrase.
+const BUCKET_PHRASES = {
+    read: ['reading a file', 'reading {count} files'],
+    search: ['searching files', 'searching files'],
+    edit: ['editing a file', 'editing {count} files'],
+    command: ['running a command', 'running {count} commands'],
+    lookup: ['looking things up', 'looking things up'],
+    delegate: ['handing off a task', 'handing off {count} tasks'],
+    question: ['asking a question', 'asking a question'],
+    skill: ['picking up a skill', 'picking up {count} skills'],
+} satisfies Record<ToolBucket, readonly [string, string]>;
+
 const WORKING_PHRASES = [
     'working',
     'processing',
     'preparing',
     'warming up',
-    'gears turning',
+    'turning gears',
     'computing',
     'calculating',
     'analyzing',
@@ -118,6 +143,7 @@ const WORKING_PHRASES = [
     'connecting dots',
     'inspecting logic',
     'weighing options',
+    'pondering',
 ];
 
 type ParsedStatusResult = {
@@ -128,18 +154,24 @@ type ParsedStatusResult = {
     canBackground: boolean;
 };
 
-const getToolStatusPhrase = (toolName: string): string => {
-    return TOOL_STATUS_PHRASES.get(toolName) ?? `using ${toolName}`;
+const getToolStatusPhrase = (toolName: string, count = 1): string => {
+    const bucket = TOOL_BUCKETS.get(toolName);
+    if (!bucket) {
+        return `using ${toolName}`;
+    }
+    const [one, many] = BUCKET_PHRASES[bucket];
+    return (count > 1 ? many : one).replace('{count}', String(count));
 };
 
 /**
  * A running `execute` (Code Mode) script names the tool it is calling as soon
  * as its metadata lists one, so the pill tracks the script's real work instead
- * of sitting on a generic phrase for its whole run.
+ * of sitting on a generic phrase for its whole run. Parallel commands are the
+ * exception: one call's name cannot speak for several, so they count instead.
  */
-const getRunningToolPhrase = (part: ToolPart, toolName: string): string => {
-    if (!isExecuteTool(toolName)) {
-        return getToolStatusPhrase(toolName);
+const getRunningToolPhrase = (part: ToolPart, toolName: string, count: number): string => {
+    if (!isExecuteTool(toolName) || count > 1) {
+        return getToolStatusPhrase(toolName, count);
     }
     const state = part.state;
     const calls = executeToolCalls(state && 'metadata' in state ? state.metadata : undefined);
@@ -171,7 +203,8 @@ export const hasBackgroundableWork = (parts: readonly Part[]): boolean => parts.
     && (isShellTool(part.tool) || isSubagentTool(part.tool))
 ));
 
-const createParsedStatus = (parts: Part[], genericKey: string): ParsedStatusResult => {
+export const createParsedStatus = (parts: Part[], genericKey: string): ParsedStatusResult => {
+    const runningToolCounts = countRunningToolCalls(parts);
     let activePartType: ParsedStatusResult['activePartType'] = undefined;
     let activeToolName: string | undefined = undefined;
     let activeToolPhrase: string | undefined = undefined;
@@ -193,14 +226,10 @@ const createParsedStatus = (parts: Part[], genericKey: string): ParsedStatusResu
                 const toolStatus = part.state?.status;
                 if ((toolStatus === 'running' || toolStatus === 'pending') && !activePartType) {
                     const toolName = getToolDisplayName(part);
-                    if (EDITING_TOOLS.has(toolName)) {
-                        activePartType = 'editing';
-                        activeToolName = toolName;
-                    } else {
-                        activePartType = 'tool';
-                        activeToolName = toolName;
-                        activeToolPhrase = getRunningToolPhrase(part, toolName);
-                    }
+                    const bucket = TOOL_BUCKETS.get(toolName);
+                    activePartType = bucket === 'edit' ? 'editing' : 'tool';
+                    activeToolName = toolName;
+                    activeToolPhrase = getRunningToolPhrase(part, toolName, runningToolCounts.get(bucket ?? toolName) ?? 1);
                 }
                 break;
             }
@@ -222,10 +251,10 @@ const createParsedStatus = (parts: Part[], genericKey: string): ParsedStatusResu
 
     const isGenericStatus = activePartType === undefined;
     const statusText = (() => {
-        if (activePartType === 'editing') return activeToolName === 'multiedit' ? getToolStatusPhrase(activeToolName) : 'editing file';
+        if (activePartType === 'editing') return activeToolPhrase ?? 'editing a file';
         if (activePartType === 'tool' && activeToolName) return activeToolPhrase ?? getToolStatusPhrase(activeToolName);
-        if (activePartType === 'reasoning') return 'thinking';
-        if (activePartType === 'text') return 'composing';
+        if (activePartType === 'reasoning') return 'thinking it through';
+        if (activePartType === 'text') return 'writing a reply';
         return getStableWorkingPhrase(genericKey);
     })();
 
@@ -292,6 +321,24 @@ const getToolDisplayName = (part: ToolPart): string => {
     return typeof candidate.name === 'string' ? candidate.name : 'tool';
 };
 
+/**
+ * Parallel calls are common (three reads, two shell commands), and the last
+ * part alone hides the rest. Count every call that is still running or pending
+ * by bucket so the phrase can say "reading 3 files" instead.
+ */
+const countRunningToolCalls = (parts: readonly Part[]): Map<string, number> => {
+    const counts = new Map<string, number>();
+    for (const part of parts) {
+        if (part.type !== 'tool') continue;
+        const status = part.state?.status;
+        if (status !== 'running' && status !== 'pending') continue;
+        const toolName = getToolDisplayName(part);
+        const bucket = TOOL_BUCKETS.get(toolName) ?? toolName;
+        counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+    }
+    return counts;
+};
+
 /** True when a user prompt follows `index`, i.e. a turn is queued or starting. */
 const hasNewerPrompt = (messages: Message[], index: number): boolean => {
     for (let cursor = messages.length - 1; cursor > index; cursor -= 1) {
@@ -339,6 +386,7 @@ export const getActiveAssistantContext = (messages: Message[], sessionModel?: Mo
 };
 
 export function useAssistantStatus(): AssistantStatusSnapshot {
+    const { t } = useI18n();
     // Inside the chat column, follow the session the timeline shows rather
     // than the live selection, so the status chip changes together with the
     // conversation instead of a commit ahead of it.
@@ -378,6 +426,17 @@ export function useAssistantStatus(): AssistantStatusSnapshot {
     );
 
     const { phase: activityPhase, isWorking: isPhaseWorking } = useSessionActivity(currentSessionId, currentSessionDirectory ?? undefined);
+
+    // Live progress: wall time since the session's turn started, from the same
+    // per-session timing the session rows use. Ticks once a second, only while
+    // the turn runs.
+    const activityStartedAt = useSessionActivityStartedAt(currentSessionId ?? '');
+    const activityNow = useDurationTickerNow(isPhaseWorking, 1000);
+    const elapsedLabel = React.useMemo(() => (
+        isPhaseWorking && activityStartedAt !== undefined
+            ? formatSessionActivityDuration(Math.max(0, activityNow - activityStartedAt), t)
+            : null
+    ), [isPhaseWorking, activityStartedAt, activityNow, t]);
 
     const currentSessionStatus = useSessionStatus(currentSessionId ?? '', currentSessionDirectory ?? undefined);
 
@@ -454,6 +513,7 @@ export function useAssistantStatus(): AssistantStatusSnapshot {
             isCooldown,
             lifecyclePhase: isStreaming ? 'streaming' : isCooldown ? 'cooldown' : null,
             statusText: isWorking ? parsedStatus.statusText : null,
+            elapsedLabel: isWorking ? elapsedLabel : null,
             isGenericStatus: isWorking ? parsedStatus.isGenericStatus : true,
             isWaitingForPermission: false,
             canAbort: isWorking,
@@ -467,7 +527,7 @@ export function useAssistantStatus(): AssistantStatusSnapshot {
             retryInfo,
             canBackground: isWorking && parsedStatus.canBackground,
         };
-    }, [activityPhase, isPhaseWorking, parsedStatus, abortState, sessionRetryAttempt, sessionRetryNext, assistantRetry]);
+    }, [activityPhase, isPhaseWorking, parsedStatus, abortState, sessionRetryAttempt, sessionRetryNext, assistantRetry, elapsedLabel]);
 
     const forming = React.useMemo<FormingSummary>(() => {
         const isActive = isPhaseWorking && parsedStatus.activePartType === 'text';

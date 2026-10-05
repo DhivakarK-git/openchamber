@@ -5,8 +5,6 @@ import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
 import { useAssistantStatus } from '@/hooks/useAssistantStatus';
 import { useBackgroundSessionWork } from '@/hooks/useBackgroundSessionWork';
-import { useConfigStore } from '@/stores/useConfigStore';
-import { getProviderModelDisplayName } from '@/lib/modelDisplay';
 import { BackgroundWorkButton } from './BackgroundWorkButton';
 
 /** The scroll action: the arrow, plus the status label while the session works. */
@@ -38,22 +36,15 @@ const ScrollAction: React.FC<{ onClick: () => void; children?: React.ReactNode }
  * scroll button, never inside it.
  */
 const WorkingPillBody: React.FC<{ onClick: () => void }> = ({ onClick }) => {
-    const { t } = useI18n();
-    const { activeModel, working } = useAssistantStatus();
-    const providers = useConfigStore((state) => state.providers);
+    const { working } = useAssistantStatus();
     const backgroundWork = useBackgroundSessionWork();
-
-    const modelName = React.useMemo(() => {
-        if (!activeModel) return null;
-        const provider = providers.find((candidate) => candidate.id === activeModel.providerId);
-        return getProviderModelDisplayName(provider, activeModel.modelId) || null;
-    }, [activeModel, providers]);
 
     if (!working.isWorking || !working.statusText) return <ScrollAction onClick={onClick} />;
     const status = working.statusText;
-    const label = modelName && modelName.trim().length > 0
-        ? t('chat.statusRow.modelStatus', { model: modelName.trim(), status })
-        : status.charAt(0).toUpperCase() + status.slice(1);
+    // Same line as the floating chip, progress included, so the handoff
+    // between them reads as one element changing chrome.
+    const baseLabel = status.charAt(0).toUpperCase() + status.slice(1);
+    const label = working.elapsedLabel ? `${baseLabel} · ${working.elapsedLabel}` : baseLabel;
 
     return (
         <>

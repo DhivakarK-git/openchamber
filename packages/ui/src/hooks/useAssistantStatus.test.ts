@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import type { AssistantMessage, Part, SyntheticMessage, UserMessage } from '@/lib/opencode/model';
+import type { AssistantMessage, Part, SyntheticMessage, ToolState, UserMessage } from '@/lib/opencode/model';
 
-import { getActiveAssistantContext, hasBackgroundableWork } from './useAssistantStatus';
+import { createParsedStatus, getActiveAssistantContext, hasBackgroundableWork } from './useAssistantStatus';
 
 const userMessage = (id: string): UserMessage => ({
     id,
@@ -137,5 +137,65 @@ describe('hasBackgroundableWork', () => {
             metadata: { status: 'running', shellID: 'sh_1' },
             time: { start: 1, end: 2 },
         })])).toBe(false);
+    });
+});
+
+describe('createParsedStatus', () => {
+    const toolState = (status: 'running' | 'pending' | 'completed'): ToolState => {
+        if (status === 'completed') {
+            return { status: 'completed', input: {}, output: '', time: { start: 1, end: 2 } };
+        }
+        if (status === 'pending') {
+            return { status: 'pending', input: {}, raw: '' };
+        }
+        return { status: 'running', input: {}, time: { start: 1 } };
+    };
+
+    const tool = (id: string, name: string, status: 'running' | 'pending' | 'completed' = 'running'): Part => ({
+        id,
+        sessionID: 'ses_1',
+        messageID: 'msg_1',
+        type: 'tool',
+        callID: `call_${id}`,
+        tool: name,
+        state: toolState(status),
+    });
+
+    const statusOf = (parts: Part[]) => createParsedStatus(parts, 'ses_1:msg_1');
+
+    test('abstracts a tool into one human phrase', () => {
+        expect(statusOf([tool('1', 'read')]).statusText).toBe('reading a file');
+        expect(statusOf([tool('1', 'patch')]).statusText).toBe('editing a file');
+        expect(statusOf([tool('1', 'shell')]).statusText).toBe('running a command');
+        expect(statusOf([tool('1', 'webfetch')]).statusText).toBe('looking things up');
+        expect(statusOf([tool('1', 'subagent')]).statusText).toBe('handing off a task');
+        expect(statusOf([tool('1', 'skill')]).statusText).toBe('picking up a skill');
+    });
+
+    test('counts parallel calls per bucket, not per tool', () => {
+        expect(statusOf([tool('1', 'read'), tool('2', 'read'), tool('3', 'file-diff')]).statusText).toBe('reading 3 files');
+        expect(statusOf([tool('1', 'write'), tool('2', 'patch')]).statusText).toBe('editing 2 files');
+        expect(statusOf([tool('1', 'shell'), tool('2', 'execute')]).statusText).toBe('running 2 commands');
+        expect(statusOf([tool('1', 'subagent'), tool('2', 'subagent')]).statusText).toBe('handing off 2 tasks');
+    });
+
+    test('searches without counting calls, since one call spans many files', () => {
+        expect(statusOf([tool('1', 'grep'), tool('2', 'glob')]).statusText).toBe('searching files');
+    });
+
+    test('counts only unfinished calls', () => {
+        expect(statusOf([tool('1', 'read'), tool('2', 'read', 'completed')]).statusText).toBe('reading a file');
+    });
+
+    test('keeps the newest running bucket when different tools run together', () => {
+        expect(statusOf([tool('1', 'read'), tool('2', 'shell')]).statusText).toBe('running a command');
+        expect(statusOf([tool('1', 'shell'), tool('2', 'read')]).statusText).toBe('reading a file');
+    });
+
+    test('names thinking and writing states', () => {
+        const reasoning: Part = { id: '1', sessionID: 'ses_1', messageID: 'msg_1', type: 'reasoning', text: '', time: { start: 1 } };
+        const text: Part = { id: '2', sessionID: 'ses_1', messageID: 'msg_1', type: 'text', text: 'hello' };
+        expect(statusOf([reasoning]).statusText).toBe('thinking it through');
+        expect(statusOf([text]).statusText).toBe('writing a reply');
     });
 });

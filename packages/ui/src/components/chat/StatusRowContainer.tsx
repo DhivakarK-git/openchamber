@@ -39,6 +39,7 @@ export const StatusRowContainer: React.FC = React.memo(() => {
         <StatusRow
             isWorking={working.isWorking}
             statusText={working.statusText}
+            elapsedLabel={working.elapsedLabel}
             isGenericStatus={working.isGenericStatus}
             isWaitingForPermission={working.isWaitingForPermission}
             abortActive={working.abortActive}
