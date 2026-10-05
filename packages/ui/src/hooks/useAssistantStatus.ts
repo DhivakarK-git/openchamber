@@ -137,7 +137,7 @@ const WORKING_PHRASES = [
     'computing',
     'calculating',
     'analyzing',
-    'wheels spinning',
+    'spinning wheels',
     'calibrating',
     'synthesizing',
     'connecting dots',
